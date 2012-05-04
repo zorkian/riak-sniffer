@@ -48,13 +48,13 @@ given user.
 
     $ sudo ./riak-sniffer  -v
     Initializing Riak sniffing on eth0:8087...
-    [q] get user:83485334
-    [q] get log:83485334
-    [q] get log:345833
-    [q] get user:345833
-    [q] get user:133432
-    [q] get user:1953900
-    [q] get status:383113
+    get user:83485334
+    get log:83485334
+    get log:345833
+    get user:345833
+    put user:133432
+    get user:1953900
+    get status:383113
 
 Etc.
 

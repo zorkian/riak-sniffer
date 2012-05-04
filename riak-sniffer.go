@@ -179,7 +179,7 @@ func riakSourceListener(rs *riakSource) {
 				text := fmt.Sprintf("%s %s:%s", (*msg).method, (*msg).bucket, safe_output((*msg).key))
 				//text := fmt.Sprintf("%s", rs.src)
 				if verbose {
-					log.Printf("[q] %s", text)
+					log.Printf("%s", text)
 				} else {
 					qbuf[text]++
 				}
