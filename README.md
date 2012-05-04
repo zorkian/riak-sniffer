@@ -3,12 +3,10 @@
 ## Description
 
 This program uses libpcap to capture and analyze packets destined for
-a Riak server.  With a variety of command line options, you can tune
-the output to show you a variety of outputs to help diagnose what your
-clients are doing.
+a Riak server that is using the protobuf API. This tool helps diagnose
+what queries are being sent to your database.
 
-There are other options useful for tuning the output to your
-specifications.  Please see the application help and play with it.
+Read on to see some examples of what this tool can tell you.
 
 
 ## Examples
