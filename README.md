@@ -6,9 +6,9 @@ This program uses libpcap to capture and analyze packets destined for a
 Riak server.  With a variety of command line options, you can tune the
 output to show you a variety of outputs, such as:
 
-    * top N queries since you started running the program
-    * top N queries every X seconds (sliding window)
-    * all queries (sanitized or not)
+* top N queries since you started running the program
+* top N queries every X seconds (sliding window)
+* all queries (sanitized or not)
 
 There are other options useful for tuning the output to your
 specifications.  Please see the application help and play with it.
@@ -20,7 +20,7 @@ I assume you have $GOPATH set correctly. To build this project, first
 you need the protobuf set up for Go. This is pretty straightforward, you
 can get directions here:
 
-    http://code.google.com/p/goprotobuf/
+* http://code.google.com/p/goprotobuf/
 
 Next, you have to build and install the Riak protobufs in a Go
 package. This is done like this:
