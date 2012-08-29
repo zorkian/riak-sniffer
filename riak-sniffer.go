@@ -45,6 +45,7 @@ var qbuf map[string]int = make(map[string]int)
 var querycount int
 var chmap map[string]riakSource = make(map[string]riakSource)
 var verbose bool = false
+var with_key bool = false
 
 func UnixNow() int64 {
 	return time.Now().Unix()
@@ -57,9 +58,11 @@ func main() {
 	var period *int = flag.Int("t", 10, "Seconds between outputting status")
 	var displaycount *int = flag.Int("d", 25, "Display this many queries in status updates")
 	var doverbose *bool = flag.Bool("v", false, "Print every query received (spammy)")
+	var loc_with_key *bool = flag.Bool("k", false, "Output bucket:key instead of just bucket")
 	flag.Parse()
 
 	verbose = *doverbose
+	with_key = *loc_with_key
 
 	log.SetPrefix("")
 	log.SetFlags(0)
@@ -125,15 +128,15 @@ func handleStatusUpdate(displaycount int) {
 
 // given a string, return a string with safe-to-print bytes
 func safe_output(inp []byte) string {
-    out := ""
-    for _, v := range inp {
-        if v >= 32 && v <= 126 {
-            out += string(v)
-        } else {
-            out += fmt.Sprintf("\\x%02x", v)
-        }
-    }
-    return out
+	out := ""
+	for _, v := range inp {
+		if v >= 32 && v <= 126 {
+			out += string(v)
+		} else {
+			out += fmt.Sprintf("\\x%02x", v)
+		}
+	}
+	return out
 }
 
 // Listens on a channel for bytes. This is how we get data in from the various
@@ -148,6 +151,12 @@ func riakSourceListener(rs *riakSource) {
 		// we know exactly where the packet boundaries are and we can
 		// reliably parse this stream of bytes. Until a source is in the
 		// synced state, we want to ignore its data.
+		//
+		// FIXME: we are not really using this logic well yet, we never
+		// set the synced flag on at the end. This works fine for now but
+		// ultimately I want to parse all of the communications back and
+		// forth and therefore need to finish implementing this.
+		//
 		if !rs.synced {
 			datalen := uint32(len(data))
 
@@ -176,7 +185,12 @@ func riakSourceListener(rs *riakSource) {
 			if msg != nil {
 				querycount++
 				//text := fmt.Sprintf("%s %s %s:%x", rs.src, (*msg).method, (*msg).bucket, (*msg).key)
-				text := fmt.Sprintf("%s %s:%s", (*msg).method, (*msg).bucket, safe_output((*msg).key))
+				var text string
+				if with_key {
+					text = fmt.Sprintf("%s %s:%s", (*msg).method, (*msg).bucket, safe_output((*msg).key))
+				} else {
+					text = fmt.Sprintf("%s %s", (*msg).method, (*msg).bucket)
+				}
 				//text := fmt.Sprintf("%s", rs.src)
 				if verbose {
 					log.Printf("%s", text)
