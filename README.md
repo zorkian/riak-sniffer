@@ -74,6 +74,7 @@ arguments you just tell us what you want to see and we make it happen.
     #k       The key being accessed.
     #b       The bucket being accessed.
     #s       The "IP:PORT" of the remote end of the query. (Source.)
+    #i       The "IP" of the remote end. (Source IP.)
 
 For example, you can use these to ask "what buckets are most popular" by
 doing something like this:

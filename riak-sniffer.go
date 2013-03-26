@@ -38,11 +38,13 @@ const (
 	F_BUCKET
 	F_KEY
 	F_SOURCE
+	F_SOURCEIP
 )
 
 type riakSourceChannel chan ([]byte)
 type riakSource struct {
 	src    string
+	srcip  string
 	synced bool
 	ch     riakSourceChannel
 }
@@ -208,6 +210,8 @@ func riakSourceListener(rs *riakSource) {
 							text += string((*msg).bucket)
 						case F_SOURCE:
 							text += rs.src
+						case F_SOURCEIP:
+							text += rs.srcip
 						default:
 							log.Fatalf("Unknown F_XXXXXX int in format string")
 						}
@@ -265,7 +269,8 @@ func getProto(msgtype byte, data []byte) (*riakMessage, error) {
 func getChannel(src *string) riakSourceChannel {
 	rs, ok := chmap[*src]
 	if !ok {
-		rs = riakSource{src: *src, synced: false, ch: make(riakSourceChannel, 10)}
+		srcip := (*src)[0:strings.Index(*src, ":")]
+		rs = riakSource{src: *src, srcip: srcip, synced: false, ch: make(riakSourceChannel, 10)}
 		go riakSourceListener(&rs)
 		chmap[*src] = rs
 	}
@@ -334,6 +339,8 @@ func parseFormat(formatstr string) {
 				do_append = F_BUCKET
 			case "s":
 				do_append = F_SOURCE
+			case "i":
+				do_append = F_SOURCEIP
 			default:
 				curstr += "#" + string(char)
 			}
