@@ -39,6 +39,7 @@ const (
 	F_KEY
 	F_SOURCE
 	F_SOURCEIP
+	F_METHOD
 )
 
 type riakSourceChannel chan ([]byte)
@@ -212,6 +213,8 @@ func riakSourceListener(rs *riakSource) {
 							text += rs.src
 						case F_SOURCEIP:
 							text += rs.srcip
+						case F_METHOD:
+							text += (*msg).method
 						default:
 							log.Fatalf("Unknown F_XXXXXX int in format string")
 						}
@@ -341,6 +344,8 @@ func parseFormat(formatstr string) {
 				do_append = F_SOURCE
 			case "i":
 				do_append = F_SOURCEIP
+			case "m":
+				do_append = F_METHOD
 			default:
 				curstr += "#" + string(char)
 			}

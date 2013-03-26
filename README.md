@@ -71,6 +71,7 @@ on what your needs are.
 Think of this like a printf string, except instead of you supplying the
 arguments you just tell us what you want to see and we make it happen.
 
+    #m       Method. ("get" or "put".)
     #k       The key being accessed.
     #b       The bucket being accessed.
     #s       The "IP:PORT" of the remote end of the query. (Source.)
