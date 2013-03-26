@@ -106,7 +106,7 @@ func main() {
 			// simple output printer... this should be super fast since we expect that a
 			// system like this will have relatively few unique queries once they're
 			// canonicalized.
-			if !verbose && querycount%100 == 0 && last < UnixNow()-int64(*period) {
+			if !verbose && last <= UnixNow()-int64(*period) {
 				last = UnixNow()
 				handleStatusUpdate(*displaycount)
 			}
@@ -126,7 +126,7 @@ func handleStatusUpdate(displaycount int) {
 	// we cheat so badly here...
 	var tmp sort.StringSlice = make([]string, 0, len(qbuf))
 	for q, c := range qbuf {
-		tmp = append(tmp, fmt.Sprintf("%6d  %0.2f/s  %s", c, float64(c)/elapsed, q))
+		tmp = append(tmp, fmt.Sprintf("%6d  %6.2f/s  %s", c, float64(c)/elapsed, q))
 	}
 	sort.Sort(tmp)
 
