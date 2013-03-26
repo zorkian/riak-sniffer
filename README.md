@@ -6,6 +6,10 @@ This program uses libpcap to capture and analyze packets destined for
 a Riak server that is using the protobuf API. This tool helps diagnose
 what queries are being sent to your database.
 
+You can either output the data raw or you can aggregate it to get an
+idea of what's going on. Show popular queries, clients, buckets, keys,
+etc.
+
 Read on to see some examples of what this tool can tell you.
 
 
@@ -57,29 +61,44 @@ given user.
 Etc.
 
 
+## Format Strings
+
+There are many ways of slicing your data. Each query that is intercepted
+has certain bits of data and you can output only the bits you care
+about. You can use this to answer different kinds of questions depending
+on what your needs are.
+
+Think of this like a printf string, except instead of you supplying the
+arguments you just tell us what you want to see and we make it happen.
+
+    #k       The key being accessed.
+    #b       The bucket being accessed.
+    #s       The "IP:PORT" of the remote end of the query. (Source.)
+
+For example, you can use these to ask "what buckets are most popular" by
+doing something like this:
+
+    $ sudo ./riak-sniffer -f '#b'
+
+The output will only show buckets. Keys and sources will be ignored. Or,
+if you want to break everything down and see if you're getting swamped
+by one host sending the same query:
+
+    $ sudo ./riak-sniffer -f '#s #b:#k'
+
+The output will look like "10.3.4.53:38333 foo:somekey" and you can
+easily tell if someone is misbehaving egregiously.
+
+
 ## Building
 
-This requires Go 1. I also assume you have $GOPATH set correctly. To
-build this project, first you need the protobuf set up for Go. This is
-pretty straightforward, you can get directions here:
+This requires Go 1. Building and using this project should be a simple as:
 
-* http://code.google.com/p/goprotobuf/
+    $ go get github.com/xb95/riak-sniffer
+    $ go install github.com/xb95/riak-sniffer
 
-Next, you have to build and install the Riak protobufs in a Go
-package. This is done like this:
-
-    $ cd $GOPATH/src
-    $ mkdir riakclient && cd riakclient
-    $ wget https://raw.github.com/basho/riak-erlang-client/master/src/riakclient.proto
-    $ protoc --plugin=$GOROOT/bin/protoc-gen-go --go_out=. riakclient.proto
-    $ go build
-
-If that success, now you can build the riak-sniffer:
-
-    $ cd path-you-cloned-the-repo
-    $ go build
-
-Enjoy!
+This package bundles the Riak protobufs. They are slightly hand-modified
+to build them into a single package.
 
 
 ## Bugs and Improvements 

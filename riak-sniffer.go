@@ -18,14 +18,26 @@
 package main
 
 import (
+	riak "./proto"
 	"code.google.com/p/goprotobuf/proto"
+	"errors"
 	"flag"
 	"fmt"
 	"github.com/akrennmair/gopcap"
 	"log"
-	"riakclient"
 	"sort"
+	"strings"
 	"time"
+)
+
+// Format constants. This is a somewhat complicated system to prevent us from
+// doing simple string substitution in the middle of the key/bucket if they
+// happen to contain '#k' or something.
+const (
+	F_NONE = iota
+	F_BUCKET
+	F_KEY
+	F_SOURCE
 )
 
 type riakSourceChannel chan ([]byte)
@@ -45,7 +57,7 @@ var qbuf map[string]int = make(map[string]int)
 var querycount int
 var chmap map[string]riakSource = make(map[string]riakSource)
 var verbose bool = false
-var with_key bool = false
+var format []interface{}
 
 func UnixNow() int64 {
 	return time.Now().Unix()
@@ -58,26 +70,25 @@ func main() {
 	var period *int = flag.Int("t", 10, "Seconds between outputting status")
 	var displaycount *int = flag.Int("d", 25, "Display this many queries in status updates")
 	var doverbose *bool = flag.Bool("v", false, "Print every query received (spammy)")
-	var loc_with_key *bool = flag.Bool("k", false, "Output bucket:key instead of just bucket")
+	var formatstr *string = flag.String("f", "#b:#k", "Format for output aggregation")
 	flag.Parse()
 
 	verbose = *doverbose
-	with_key = *loc_with_key
+	parseFormat(*formatstr)
 
 	log.SetPrefix("")
 	log.SetFlags(0)
 
 	log.Printf("Initializing Riak sniffing on %s:%d...", *eth, *port)
 	iface, err := pcap.Openlive(*eth, int32(*snaplen), false, 0)
-	if iface == nil || err != "" {
-		if err == "" {
-			err = "unknown error"
+	if iface == nil || err != nil {
+		if err == nil {
+			err = errors.New("unknown error")
 		}
 		log.Fatalf("Failed to open device: %s", err)
 	}
 
-	err = iface.Setfilter(fmt.Sprintf("tcp dst port %d", *port))
-	if err != "" {
+	if err = iface.Setfilter(fmt.Sprintf("tcp dst port %d", *port)); err != nil {
 		log.Fatalf("Failed to set port filter: %s", err)
 	}
 
@@ -184,14 +195,28 @@ func riakSourceListener(rs *riakSource) {
 			// If we actually got a message, then we're synced.
 			if msg != nil {
 				querycount++
-				//text := fmt.Sprintf("%s %s %s:%x", rs.src, (*msg).method, (*msg).bucket, (*msg).key)
 				var text string
-				if with_key {
-					text = fmt.Sprintf("%s %s:%s", (*msg).method, (*msg).bucket, safe_output((*msg).key))
-				} else {
-					text = fmt.Sprintf("%s %s", (*msg).method, (*msg).bucket)
+				for _, item := range format {
+					switch item.(type) {
+					case int:
+						switch item.(int) {
+						case F_NONE:
+							log.Fatalf("F_NONE in format string")
+						case F_KEY:
+							text += safe_output((*msg).key)
+						case F_BUCKET:
+							text += string((*msg).bucket)
+						case F_SOURCE:
+							text += rs.src
+						default:
+							log.Fatalf("Unknown F_XXXXXX int in format string")
+						}
+					case string:
+						text += item.(string)
+					default:
+						log.Fatalf("Unknown type in format string")
+					}
 				}
-				//text := fmt.Sprintf("%s", rs.src)
 				if verbose {
 					log.Printf("%s", text)
 				} else {
@@ -215,7 +240,7 @@ func getProto(msgtype byte, data []byte) (*riakMessage, error) {
 
 	switch msgtype {
 	case 0x09:
-		obj := &riakclient.RpbGetReq{}
+		obj := &riak.RpbGetReq{}
 		err := proto.Unmarshal(data, obj)
 		if err != nil {
 			return nil, err
@@ -223,7 +248,7 @@ func getProto(msgtype byte, data []byte) (*riakMessage, error) {
 
 		ret = &riakMessage{method: "get", bucket: []byte(obj.Bucket), key: []byte(obj.Key)}
 	case 0x0B:
-		obj := &riakclient.RpbPutReq{}
+		obj := &riak.RpbPutReq{}
 		err := proto.Unmarshal(data, obj)
 		if err != nil {
 			return nil, err
@@ -276,4 +301,58 @@ func handlePacket(pkt *pcap.Packet) {
 	// somebody who is better equipped to process it.
 	src := fmt.Sprintf("%d.%d.%d.%d:%d", srcIP[0], srcIP[1], srcIP[2], srcIP[3], srcPort)
 	getChannel(&src) <- pkt.Data[pos:]
+}
+
+// parseFormat takes a string and parses it out into the given format slice
+// that we later use to build up a string. This might actually be an overcomplicated
+// solution?
+func parseFormat(formatstr string) {
+	formatstr = strings.TrimSpace(formatstr)
+	if formatstr == "" {
+		formatstr = "#b:#k"
+	}
+
+	is_special := false
+	curstr := ""
+	do_append := F_NONE
+	for _, char := range formatstr {
+		if char == '#' {
+			if is_special {
+				curstr += string(char)
+				is_special = false
+			} else {
+				is_special = true
+			}
+			continue
+		}
+
+		if is_special {
+			switch strings.ToLower(string(char)) {
+			case "k":
+				do_append = F_KEY
+			case "b":
+				do_append = F_BUCKET
+			case "s":
+				do_append = F_SOURCE
+			default:
+				curstr += "#" + string(char)
+			}
+			is_special = false
+		} else {
+			curstr += string(char)
+		}
+
+		if do_append != F_NONE {
+			if curstr != "" {
+				format = append(format, curstr, do_append)
+				curstr = ""
+			} else {
+				format = append(format, do_append)
+			}
+			do_append = F_NONE
+		}
+	}
+	if curstr != "" {
+		format = append(format, curstr)
+	}
 }
