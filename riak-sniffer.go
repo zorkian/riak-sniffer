@@ -50,13 +50,17 @@ type packet struct {
 
 type riakSourceChannel chan *packet
 type riakSource struct {
-	src      string
-	srcip    string
-	synced   bool
-	reqSent  *time.Time
-	reqTimes [100]uint64
-	qdata    *queryData
-	ch       riakSourceChannel
+	src       string
+	srcip     string
+	synced    bool
+	reqbuffer []byte
+	resbuffer []byte
+	reqSent   *time.Time
+	reqTimes  [100]uint64
+	qbytes    uint64
+	qdata     *queryData
+	qtext     string
+	ch        riakSourceChannel
 }
 
 type riakMessage struct {
@@ -67,6 +71,7 @@ type riakMessage struct {
 
 type queryData struct {
 	count uint64
+	bytes uint64
 	times [100]uint64
 }
 
@@ -86,7 +91,6 @@ func UnixNow() int64 {
 func main() {
 	var lport *int = flag.Int("P", 8087, "Riak protocol buffer port")
 	var eth *string = flag.String("i", "eth0", "Interface to sniff")
-	var snaplen *int = flag.Int("s", 1024, "Bytes of each packet to sniff")
 	var period *int = flag.Int("t", 10, "Seconds between outputting status")
 	var displaycount *int = flag.Int("d", 25, "Display this many queries in status updates")
 	var doverbose *bool = flag.Bool("v", false, "Print every query received (spammy)")
@@ -102,7 +106,7 @@ func main() {
 	log.SetFlags(0)
 
 	log.Printf("Initializing Riak sniffing on %s:%d...", *eth, port)
-	iface, err := pcap.Openlive(*eth, int32(*snaplen), false, 0)
+	iface, err := pcap.Openlive(*eth, 65535, false, 0)
 	if iface == nil || err != nil {
 		if err == nil {
 			err = errors.New("unknown error")
@@ -177,8 +181,8 @@ func handleStatusUpdate(displaycount int) {
 	var tmp sort.StringSlice = make([]string, 0, len(qbuf))
 	for q, c := range qbuf {
 		qmin, qavg, qmax := calculateTimes(&c.times)
-		tmp = append(tmp, fmt.Sprintf("%6d  %6.2f/s  %6.2f %6.2f %6.2f  %s",
-			c.count, float64(c.count)/elapsed, qmin, qavg, qmax, q))
+		tmp = append(tmp, fmt.Sprintf("%6d  %6.2f/s  %6.2f %6.2f %6.2f %8db  %s",
+			c.count, float64(c.count)/elapsed, qmin, qavg, qmax, c.bytes, q))
 	}
 	sort.Sort(tmp)
 
@@ -210,130 +214,174 @@ func safe_output(inp []byte) string {
 func riakSourceListener(rs *riakSource) {
 	for {
 		pkt := <-rs.ch
-		//		log.Printf("[debug] %s request=%s type=%d len=%d", rs.src, pkt.request, pkt.data[4], len(pkt.data[5:]))
+		//		log.Printf("[%s] request=%t, got %d bytes", rs.src, pkt.request,
+		//			len(pkt.data))
 
-		// Here we need to do the sync logic. This is probably fairly
-		// prone to failure, but the idea is to try to look for a packet
-		// that is in a format we can parse. If we can do that, then
-		// we know exactly where the packet boundaries are and we can
-		// reliably parse this stream of bytes. Until a source is in the
-		// synced state, we want to ignore its data.
-		//
-		// FIXME: we are not really using this logic well yet, we never
-		// set the synced flag on at the end. This works fine for now but
-		// ultimately I want to parse all of the communications back and
-		// forth and therefore need to finish implementing this.
-		//
+		var ptype int = -1
+		var pdata []byte
+
+		if pkt.request {
+			// If we still have response buffer, we're in some weird state and
+			// didn't successfully process the response.
+			if rs.resbuffer != nil {
+				//				log.Printf("[%s] possibly pipelined request? %d bytes",
+				//					rs.src, len(rs.resbuffer))
+				//				rs.resbuffer = nil
+				//				rs.synced = false
+			}
+			rs.reqbuffer = append(rs.reqbuffer, pkt.data...)
+			ptype, pdata = carvePacket(&rs.reqbuffer)
+		} else {
+			rs.resbuffer = append(rs.resbuffer, pkt.data...)
+			ptype, pdata = carvePacket(&rs.resbuffer)
+		}
+
+		// The synchronization logic: if we're not presently, then we want to
+		// keep going until we are capable of carving off of a request.
 		if !rs.synced {
-			datalen := uint32(len(pkt.data))
-
-			// Must have 4 bytes (len) + 1 byte (type) + 0+ bytes payload.
-			if datalen < 5 {
-				//				log.Printf("data < 5 continuing")
+			if !(pkt.request && ptype == 9) {
+				rs.reqbuffer, rs.resbuffer = nil, nil
 				continue
 			}
 
-			// If this is a response then we weant to record the timing and
-			// store it with this channel so we can keep track of that.
-			var reqtime uint64
-			if !pkt.request {
-				if rs.reqSent == nil {
-					continue
-				}
-				reqtime = uint64(time.Since(*rs.reqSent).Nanoseconds())
-
-				// We keep track of per-source, global, and per-query timings.
-				randn := rand.Intn(100)
-				rs.reqTimes[randn] = reqtime
-				times[randn] = reqtime
-				if rs.qdata != nil {
-					// This should never fail but it has. Probably because of a
-					// race condition I need to suss out, or sharing between
-					// two different goroutines. :(
-					rs.qdata.times[randn] = reqtime
-				}
-				rs.reqSent = nil
-				continue
-			}
-
-			// Get the length value and then bail if this packet doesn't
-			// contain a single request. It'd be nice if we didn't have this
-			// requirement, but it's probably OK.
-			size := uint32(pkt.data[0])<<24 + uint32(pkt.data[1])<<16 +
-				uint32(pkt.data[2])<<8 + uint32(pkt.data[3])
-			if datalen != size+4 {
-				continue
-			}
-
-			// Now see if we can possibly parse out the proto from this
-			// packet or if we get gibberish.
-			msg, err := getProto(pkt.data[4], pkt.data[5:])
+			// It's a GET request, so try to pull a protobuf out of this as a
+			// final test to make sure we're solid.
+			err := proto.Unmarshal(pdata, &riak.RpbGetReq{})
 			if err != nil {
+				rs.reqbuffer, rs.resbuffer = nil, nil
 				continue
 			}
 
-			// This is for sure a request, so let's count it as one.
-			if rs.reqSent != nil {
-				log.Printf("...sending two requests without a response?")
-			}
-			tnow := time.Now()
-			rs.reqSent = &tnow
+			rs.synced = true
+		}
 
-			// If we actually got a message, then we're synced.
-			if msg != nil {
-				querycount++
-				var text string
-				for _, item := range format {
-					switch item.(type) {
-					case int:
-						switch item.(int) {
-						case F_NONE:
-							log.Fatalf("F_NONE in format string")
-						case F_KEY:
-							text += safe_output((*msg).key)
-						case F_BUCKET:
-							text += string((*msg).bucket)
-						case F_SOURCE:
-							text += rs.src
-						case F_SOURCEIP:
-							text += rs.srcip
-						case F_METHOD:
-							text += (*msg).method
-						default:
-							log.Fatalf("Unknown F_XXXXXX int in format string")
-						}
-					case string:
-						text += item.(string)
-					default:
-						log.Fatalf("Unknown type in format string")
-					}
-				}
-				if verbose {
-					log.Printf("%s", text)
-				} else {
-					qdata, ok := qbuf[text]
-					if !ok {
-						qdata = &queryData{}
-						qbuf[text] = qdata
-					}
-					rs.qdata = qdata
-					qdata.count++
-					qdata.times[rand.Intn(100)] = reqtime
-				}
+		// No (full) packet detected yet. Continue on our way.
+		if ptype == -1 {
+			continue
+		}
+		plen := uint64(len(pdata))
+
+		// If this is a response then we want to record the timing and
+		// store it with this channel so we can keep track of that.
+		var reqtime uint64
+		if !pkt.request {
+			if rs.reqSent == nil {
+				continue
+			}
+			reqtime = uint64(time.Since(*rs.reqSent).Nanoseconds())
+
+			// We keep track of per-source, global, and per-query timings.
+			randn := rand.Intn(100)
+			rs.reqTimes[randn] = reqtime
+			times[randn] = reqtime
+			if rs.qdata != nil {
+				// This should never fail but it has. Probably because of a
+				// race condition I need to suss out, or sharing between
+				// two different goroutines. :(
+				rs.qdata.times[randn] = reqtime
+				rs.qdata.bytes += plen
+			}
+			rs.reqSent = nil
+
+			// If we're in verbose mode, just dump statistics from this one.
+			if verbose {
+				log.Printf("%s %d %d %0.2f\n", rs.qtext, rs.qbytes, plen,
+					float64(reqtime)/1000000)
 			}
 
-			//rs.synced = true
-			//log.Printf("%s sent %d bytes (type=%d) and is synced", rs.src, len(data), pkt.data[4])
 			continue
 		}
 
-		// We're in sync. Start storing bytes until we get a full packet.
-		//log.Printf("%s sent %d bytes (IN SYNC)", rs.src, len(data))
+		// This is for sure a request, so let's count it as one.
+		if rs.reqSent != nil {
+			//			log.Printf("[%s] ...sending two requests without a response?",
+			//				rs.src)
+		}
+		tnow := time.Now()
+		rs.reqSent = &tnow
+
+		// Now see if we can possibly parse out the proto from this
+		// packet or if we get gibberish.
+		msg, err := getProto(ptype, pdata)
+		if err != nil {
+			log.Printf("[%s] failed to parse proto: %s", rs.src, err)
+			continue
+		}
+		if msg == nil {
+			log.Printf("[%s] didn't parse message: type=%d", rs.src, ptype)
+			continue
+		}
+
+		// Convert this request into whatever format the user wants.
+		querycount++
+		var text string
+		for _, item := range format {
+			switch item.(type) {
+			case int:
+				switch item.(int) {
+				case F_NONE:
+					log.Fatalf("F_NONE in format string")
+				case F_KEY:
+					text += safe_output((*msg).key)
+				case F_BUCKET:
+					text += string((*msg).bucket)
+				case F_SOURCE:
+					text += rs.src
+				case F_SOURCEIP:
+					text += rs.srcip
+				case F_METHOD:
+					text += (*msg).method
+				default:
+					log.Fatalf("Unknown F_XXXXXX int in format string")
+				}
+			case string:
+				text += item.(string)
+			default:
+				log.Fatalf("Unknown type in format string")
+			}
+		}
+		qdata, ok := qbuf[text]
+		if !ok {
+			qdata = &queryData{}
+			qbuf[text] = qdata
+		}
+		qdata.count++
+		qdata.bytes += plen
+		rs.qtext, rs.qdata, rs.qbytes = text, qdata, plen
 	}
 }
 
+// carvePacket tries to pull a packet out of a slice of bytes. If so, it removes
+// those bytes from the slice.
+func carvePacket(buf *[]byte) (int, []byte) {
+	datalen := uint32(len(*buf))
+	if datalen < 5 {
+		return -1, nil
+	}
+
+	size := uint32((*buf)[0])<<24 + uint32((*buf)[1])<<16 + uint32((*buf)[2])<<8 +
+		uint32((*buf)[3])
+	if datalen < size+4 {
+		return -1, nil
+	}
+
+	end := size + 4
+	ptype := int((*buf)[4])
+	data := (*buf)[5 : size+4]
+	if end >= datalen {
+		*buf = nil
+	} else {
+		*buf = (*buf)[end:]
+	}
+
+	//	log.Printf("datalen=%d size=%d end=%d ptype=%d data=%d buf=%d",
+	//		datalen, size, end, ptype, len(data), len(*buf))
+
+	return ptype, data
+}
+
 // Given a set of bytes and a type, return a protocol buffer object.
-func getProto(msgtype byte, data []byte) (*riakMessage, error) {
+func getProto(msgtype int, data []byte) (*riakMessage, error) {
 	var ret *riakMessage = nil
 
 	switch msgtype {
@@ -346,7 +394,9 @@ func getProto(msgtype byte, data []byte) (*riakMessage, error) {
 
 		ret = &riakMessage{method: "get", bucket: []byte(obj.Bucket),
 			key: []byte(obj.Key)}
-	case 0x0B:
+	case 0x0a:
+		// get response
+	case 0x0b:
 		obj := &riak.RpbPutReq{}
 		err := proto.Unmarshal(data, obj)
 		if err != nil {
@@ -355,6 +405,8 @@ func getProto(msgtype byte, data []byte) (*riakMessage, error) {
 
 		ret = &riakMessage{method: "put", bucket: []byte(obj.Bucket),
 			key: []byte(obj.Key)}
+	case 0x0c:
+		// put response
 	}
 
 	return ret, nil
@@ -362,13 +414,13 @@ func getProto(msgtype byte, data []byte) (*riakMessage, error) {
 
 // Given a source ("ip:port" string), return a channel that can be used to send
 // payload bytes to. If that channel doesn't exist, it sets one up.
-func getChannel(src *string) riakSourceChannel {
-	rs, ok := chmap[*src]
+func getChannel(src string) riakSourceChannel {
+	rs, ok := chmap[src]
 	if !ok {
-		srcip := (*src)[0:strings.Index(*src, ":")]
-		rs = &riakSource{src: *src, srcip: srcip, synced: false, ch: make(riakSourceChannel, 10)}
+		srcip := src[0:strings.Index(src, ":")]
+		rs = &riakSource{src: src, srcip: srcip, synced: false, ch: make(riakSourceChannel, 10)}
 		go riakSourceListener(rs)
-		chmap[*src] = rs
+		chmap[src] = rs
 	}
 	return rs.ch
 }
@@ -420,7 +472,7 @@ func handlePacket(pkt *pcap.Packet) {
 
 	// Now we have the source and payload information, we can pass this off to
 	// somebody who is better equipped to process it.
-	getChannel(&src) <- &packet{request: request, data: pkt.Data[pos:]}
+	getChannel(src) <- &packet{request: request, data: pkt.Data[pos:]}
 }
 
 // parseFormat takes a string and parses it out into the given format slice
