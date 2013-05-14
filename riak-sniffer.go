@@ -28,6 +28,7 @@ import (
 	"math/rand"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -84,6 +85,15 @@ var format []interface{}
 var port uint16
 var times [100]uint64
 
+var stats struct {
+	packets struct {
+		rcvd      uint64
+		rcvd_sync uint64
+	}
+	desyncs uint64
+	streams uint64
+}
+
 func UnixNow() int64 {
 	return time.Now().Unix()
 }
@@ -126,9 +136,6 @@ func main() {
 		for pkt, rv = iface.NextEx(); pkt != nil; pkt, rv = iface.NextEx() {
 			handlePacket(pkt)
 
-			// simple output printer... this should be super fast since we expect that a
-			// system like this will have relatively few unique queries once they're
-			// canonicalized.
 			if !verbose && last <= UnixNow()-int64(*period) {
 				last = UnixNow()
 				handleStatusUpdate(*displaycount)
@@ -169,13 +176,22 @@ func handleStatusUpdate(displaycount int) {
 	// print status bar
 	log.Printf("\n")
 	log.SetFlags(log.Ldate | log.Ltime)
-	log.Printf("%d total queries, %0.2f per second", querycount, float64(querycount)/elapsed)
+	log.Printf("%d total queries, %0.2f per second", querycount,
+		float64(querycount)/elapsed)
 	log.SetFlags(0)
+
+	rcvd, rcvd_sync := atomic.LoadUint64(&stats.packets.rcvd),
+		atomic.LoadUint64(&stats.packets.rcvd_sync)
+	desyncs, streams := atomic.LoadUint64(&stats.desyncs),
+		atomic.LoadUint64(&stats.streams)
+	log.Printf("%d packets (%0.2f%% on synchronized streams) / %d desyncs / %d streams",
+		rcvd, float64(rcvd_sync)/float64(rcvd)*100, desyncs, streams)
 
 	// global timing values
 	gmin, gavg, gmax := calculateTimes(&times)
-	log.Printf("    %0.2fms min / %0.2fms avg / %0.2fms max query time",
+	log.Printf("%0.2fms min / %0.2fms avg / %0.2fms max query time",
 		gmin, gavg, gmax)
+	log.Printf(" ")
 
 	// we cheat so badly here...
 	var tmp sort.StringSlice = make([]string, 0, len(qbuf))
@@ -217,6 +233,11 @@ func riakSourceListener(rs *riakSource) {
 		//		log.Printf("[%s] request=%t, got %d bytes", rs.src, pkt.request,
 		//			len(pkt.data))
 
+		atomic.AddUint64(&stats.packets.rcvd, 1)
+		if rs.synced {
+			atomic.AddUint64(&stats.packets.rcvd_sync, 1)
+		}
+
 		var ptype int = -1
 		var pdata []byte
 
@@ -226,8 +247,9 @@ func riakSourceListener(rs *riakSource) {
 			if rs.resbuffer != nil {
 				//				log.Printf("[%s] possibly pipelined request? %d bytes",
 				//					rs.src, len(rs.resbuffer))
-				//				rs.resbuffer = nil
-				//				rs.synced = false
+				atomic.AddUint64(&stats.desyncs, 1)
+				rs.resbuffer = nil
+				rs.synced = false
 			}
 			rs.reqbuffer = append(rs.reqbuffer, pkt.data...)
 			ptype, pdata = carvePacket(&rs.reqbuffer)
@@ -419,6 +441,7 @@ func getChannel(src string) riakSourceChannel {
 	if !ok {
 		srcip := src[0:strings.Index(src, ":")]
 		rs = &riakSource{src: src, srcip: srcip, synced: false, ch: make(riakSourceChannel, 10)}
+		atomic.AddUint64(&stats.streams, 1)
 		go riakSourceListener(rs)
 		chmap[src] = rs
 	}
