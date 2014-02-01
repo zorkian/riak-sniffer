@@ -18,7 +18,7 @@
 package main
 
 import (
-	riak "./proto"
+	riak "github.com/xb95/riak-sniffer/proto"
 	"code.google.com/p/goprotobuf/proto"
 	"errors"
 	"flag"
